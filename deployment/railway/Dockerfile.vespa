@@ -1,25 +1,20 @@
 FROM vespaengine/vespa:8.609.39
 
-# Switch to root to fix permissions
 USER root
 
-# Set the working directory to /opt/vespa (critical for Railway)
 WORKDIR /opt/vespa
 
-# Create and set permissions for required directories
+# Create directories at build time
 RUN mkdir -p var/tmp var/db var/zookeeper logs \
     && chown -R vespa:vespa var logs \
     && chmod -R 777 var \
     && chmod -R 755 logs
 
-# Set environment variable to skip upgrade check
 ENV VESPA_SKIP_UPGRADE_CHECK=true
 
-# Switch back to vespa user
-USER vespa
+# Entrypoint script that fixes permissions at runtime (before volume is used)
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
-# Expose necessary ports
 EXPOSE 8080 8081 19071
 
-# Don't override CMD - let the base image handle startup
-# The base image knows how to start in standalone mode without VESPA_CONFIGSERVERS
+ENTRYPOINT ["/entrypoint.sh"]
