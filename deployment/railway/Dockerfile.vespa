@@ -21,5 +21,5 @@ USER vespa
 # Expose necessary ports
 EXPOSE 8080 8081 19071
 
-# Use default CMD from base image
-CMD ["/usr/local/bin/vespa-wrapper"]
+# Don't override CMD - let the base image handle startup
+# The base image knows how to start in standalone mode without VESPA_CONFIGSERVERS
