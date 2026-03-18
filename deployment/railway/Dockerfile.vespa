@@ -1,0 +1,25 @@
+FROM vespaengine/vespa:8.609.39
+
+# Switch to root to fix permissions
+USER root
+
+# Set the working directory to /opt/vespa (critical for Railway)
+WORKDIR /opt/vespa
+
+# Create and set permissions for required directories
+RUN mkdir -p var/tmp var/db var/zookeeper logs \
+    && chown -R vespa:vespa var logs \
+    && chmod -R 777 var \
+    && chmod -R 755 logs
+
+# Set environment variable to skip upgrade check
+ENV VESPA_SKIP_UPGRADE_CHECK=true
+
+# Switch back to vespa user
+USER vespa
+
+# Expose necessary ports
+EXPOSE 8080 8081 19071
+
+# Use default CMD from base image
+CMD ["/usr/local/bin/vespa-wrapper"]
