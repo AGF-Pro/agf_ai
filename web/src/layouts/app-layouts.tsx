@@ -460,9 +460,14 @@ function Footer() {
 
   const customFooterContent =
     settings?.enterpriseSettings?.custom_lower_disclaimer_content ||
-    `[Onyx ${
+    `[AGF-AI ${
       settings?.webVersion || "dev"
-    }](https://www.onyx.app/) - ${APP_SLOGAN}`;
+    }] - ${APP_SLOGAN}`;
+  // const customFooterContent =
+  //   settings?.enterpriseSettings?.custom_lower_disclaimer_content ||
+  //   `[Onyx ${
+  //     settings?.webVersion || "dev"
+  //   }](https://www.onyx.app/) - ${APP_SLOGAN}`;
 
   return (
     <footer
