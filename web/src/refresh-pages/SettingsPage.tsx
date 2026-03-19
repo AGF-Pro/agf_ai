@@ -3,11 +3,8 @@
 import { useRef, useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import * as InputLayouts from "@/layouts/input-layouts";
-import {
-  LineItemLayout,
-  Section,
-  AttachmentItemLayout,
-} from "@/layouts/general-layouts";
+import { Section, AttachmentItemLayout } from "@/layouts/general-layouts";
+import { Content, ContentAction } from "@opal/layouts";
 import { Formik, Form } from "formik";
 import * as Yup from "yup";
 import {
@@ -24,7 +21,6 @@ import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
 import PasswordInputTypeIn from "@/refresh-components/inputs/PasswordInputTypeIn";
 import InputSelect from "@/refresh-components/inputs/InputSelect";
 import InputTextArea from "@/refresh-components/inputs/InputTextArea";
-import Button from "@/refresh-components/buttons/Button";
 import Switch from "@/refresh-components/inputs/Switch";
 import { useUser } from "@/providers/UserProvider";
 import { useTheme } from "next-themes";
@@ -39,7 +35,7 @@ import useSWR from "swr";
 import { errorHandlingFetcher } from "@/lib/fetcher";
 import useFilter from "@/hooks/useFilter";
 import CreateButton from "@/refresh-components/buttons/CreateButton";
-import { Button as OpalButton } from "@opal/components";
+import { Button } from "@opal/components";
 import useFederatedOAuthStatus from "@/hooks/useFederatedOAuthStatus";
 import useCCPairs from "@/hooks/useCCPairs";
 import { ValidSources } from "@/lib/types";
@@ -61,7 +57,7 @@ import {
 } from "@/lib/constants/chatBackgrounds";
 import { SvgCheck } from "@opal/icons";
 import { cn } from "@/lib/utils";
-import { Interactive } from "@opal/core";
+import { Disabled, Interactive } from "@opal/core";
 import { usePaidEnterpriseFeaturesEnabled } from "@/components/settings/usePaidEnterpriseFeaturesEnabled";
 import { useSettingsContext } from "@/providers/SettingsProvider";
 import SimpleTooltip from "@/refresh-components/SimpleTooltip";
@@ -113,12 +109,11 @@ function PATModal({
         !!createdToken?.token ? (
           <Button onClick={onClose}>Done</Button>
         ) : (
-          <Button
-            onClick={onCreate}
-            disabled={isCreating || !newTokenName.trim()}
-          >
-            {isCreating ? "Creating Token..." : "Create Token"}
-          </Button>
+          <Disabled disabled={isCreating || !newTokenName.trim()}>
+            <Button onClick={onCreate}>
+              {isCreating ? "Creating Token..." : "Create Token"}
+            </Button>
+          </Disabled>
         )
       }
       hideCancel={!!createdToken}
@@ -240,15 +235,16 @@ function GeneralSettings() {
           title="Delete All Chats"
           onClose={() => setShowDeleteConfirmation(false)}
           submit={
-            <Button
-              danger
-              onClick={() => {
-                void handleDeleteAllChats();
-              }}
-              disabled={isDeleting}
-            >
-              {isDeleting ? "Deleting..." : "Delete"}
-            </Button>
+            <Disabled disabled={isDeleting}>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  void handleDeleteAllChats();
+                }}
+              >
+                {isDeleting ? "Deleting..." : "Delete"}
+              </Button>
+            </Disabled>
           }
         >
           <Section gap={0.5} alignItems="start">
@@ -263,7 +259,12 @@ function GeneralSettings() {
 
       <Section gap={2}>
         <Section gap={0.75}>
-          <InputLayouts.Title title="Profile" />
+          <Content
+            title="Profile"
+            sizePreset="main-content"
+            variant="section"
+            widthVariant="full"
+          />
           <Card>
             <InputLayouts.Horizontal
               title="Full Name"
@@ -319,7 +320,12 @@ function GeneralSettings() {
         </Section>
 
         <Section gap={0.75}>
-          <InputLayouts.Title title="Appearance" />
+          <Content
+            title="Appearance"
+            sizePreset="main-content"
+            variant="section"
+            widthVariant="full"
+          />
           <Card>
             <InputLayouts.Horizontal
               title="Color Mode"
@@ -424,7 +430,12 @@ function GeneralSettings() {
         <Separator noPadding />
 
         <Section gap={0.75}>
-          <InputLayouts.Title title="Danger Zone" />
+          <Content
+            title="Danger Zone"
+            sizePreset="main-content"
+            variant="section"
+            widthVariant="full"
+          />
           <Card>
             <InputLayouts.Horizontal
               title="Delete All Chats"
@@ -432,11 +443,11 @@ function GeneralSettings() {
               center
             >
               <Button
-                danger
-                secondary
+                variant="danger"
+                prominence="secondary"
                 onClick={() => setShowDeleteConfirmation(true)}
-                leftIcon={SvgTrash}
-                transient={showDeleteConfirmation}
+                icon={SvgTrash}
+                interaction={showDeleteConfirmation ? "hover" : "rest"}
               >
                 Delete All Chats
               </Button>
@@ -686,18 +697,21 @@ function PromptShortcuts() {
                   }
                 />
                 <Section>
-                  <OpalButton
-                    icon={SvgMinusCircle}
-                    onClick={() => void handleRemoveShortcut(index)}
-                    prominence="tertiary"
+                  <Disabled
                     disabled={(shortcut.isNew && isEmpty) || shortcut.is_public}
-                    aria-label="Remove shortcut"
-                    tooltip={
-                      shortcut.is_public
-                        ? "Cannot delete public prompt-shortcuts."
-                        : undefined
-                    }
-                  />
+                  >
+                    <Button
+                      icon={SvgMinusCircle}
+                      onClick={() => void handleRemoveShortcut(index)}
+                      prominence="tertiary"
+                      aria-label="Remove shortcut"
+                      tooltip={
+                        shortcut.is_public
+                          ? "Cannot delete public prompt-shortcuts."
+                          : undefined
+                      }
+                    />
+                  </Disabled>
                 </Section>
                 <InputTextArea
                   placeholder="Provide a concise 1–2 sentence summary of the following:"
@@ -737,6 +751,7 @@ function ChatPreferencesSettings() {
     updateUserShortcuts,
     updateUserDefaultModel,
     updateUserDefaultAppMode,
+    updateUserVoiceSettings,
   } = useUser();
   const isPaidEnterpriseFeaturesEnabled = usePaidEnterpriseFeaturesEnabled();
   const settings = useSettingsContext();
@@ -753,6 +768,43 @@ function ChatPreferencesSettings() {
     onSuccess: () => toast.success("Preferences saved"),
     onError: () => toast.error("Failed to save preferences"),
   });
+  const [draftVoicePlaybackSpeed, setDraftVoicePlaybackSpeed] = useState(
+    user?.preferences.voice_playback_speed ?? 1
+  );
+
+  useEffect(() => {
+    setDraftVoicePlaybackSpeed(user?.preferences.voice_playback_speed ?? 1);
+  }, [user?.preferences.voice_playback_speed]);
+
+  const saveVoiceSettings = useCallback(
+    async (settings: {
+      auto_send?: boolean;
+      auto_playback?: boolean;
+      playback_speed?: number;
+    }) => {
+      try {
+        await updateUserVoiceSettings(settings);
+        toast.success("Preferences saved");
+      } catch {
+        toast.error("Failed to save preferences");
+      }
+    },
+    [updateUserVoiceSettings]
+  );
+
+  const commitVoicePlaybackSpeed = useCallback(() => {
+    const currentSpeed = user?.preferences.voice_playback_speed ?? 1;
+    if (Math.abs(currentSpeed - draftVoicePlaybackSpeed) < 0.001) {
+      return;
+    }
+    void saveVoiceSettings({
+      playback_speed: draftVoicePlaybackSpeed,
+    });
+  }, [
+    draftVoicePlaybackSpeed,
+    saveVoiceSettings,
+    user?.preferences.voice_playback_speed,
+  ]);
 
   // Wrapper to save memories and return success/failure
   const handleSaveMemories = useCallback(
@@ -769,7 +821,12 @@ function ChatPreferencesSettings() {
   return (
     <Section gap={2}>
       <Section gap={0.75}>
-        <InputLayouts.Title title="Chats" />
+        <Content
+          title="Chats"
+          sizePreset="main-content"
+          variant="section"
+          widthVariant="full"
+        />
         <Card>
           <InputLayouts.Horizontal
             title="Default Model"
@@ -849,7 +906,12 @@ function ChatPreferencesSettings() {
             limit={500}
           />
         </InputLayouts.Vertical>
-        <InputLayouts.Title title="Memory" />
+        <Content
+          title="Memory"
+          sizePreset="main-content"
+          variant="section"
+          widthVariant="full"
+        />
         <Card>
           <InputLayouts.Horizontal
             title="Reference Stored Memories"
@@ -890,7 +952,12 @@ function ChatPreferencesSettings() {
       </Section>
 
       <Section gap={0.75}>
-        <InputLayouts.Title title="Prompt Shortcuts" />
+        <Content
+          title="Prompt Shortcuts"
+          sizePreset="main-content"
+          variant="section"
+          widthVariant="full"
+        />
         <Card>
           <InputLayouts.Horizontal
             title="Use Prompt Shortcuts"
@@ -905,6 +972,69 @@ function ChatPreferencesSettings() {
           </InputLayouts.Horizontal>
 
           {user?.preferences?.shortcut_enabled && <PromptShortcuts />}
+        </Card>
+      </Section>
+
+      <Section gap={0.75}>
+        <Content
+          title="Voice"
+          sizePreset="main-content"
+          variant="section"
+          widthVariant="full"
+        />
+        <Card>
+          <InputLayouts.Horizontal
+            title="Auto-Send"
+            description="Automatically send voice input when recording stops."
+          >
+            <Switch
+              checked={user?.preferences.voice_auto_send ?? false}
+              onCheckedChange={(checked) => {
+                void saveVoiceSettings({ auto_send: checked });
+              }}
+            />
+          </InputLayouts.Horizontal>
+
+          <InputLayouts.Horizontal
+            title="Auto-Playback"
+            description="Automatically play voice responses."
+          >
+            <Switch
+              checked={user?.preferences.voice_auto_playback ?? false}
+              onCheckedChange={(checked) => {
+                void saveVoiceSettings({ auto_playback: checked });
+              }}
+            />
+          </InputLayouts.Horizontal>
+
+          <InputLayouts.Horizontal
+            title="Playback Speed"
+            description="Adjust the speed of voice playback."
+          >
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min="0.5"
+                max="2"
+                step="0.1"
+                value={draftVoicePlaybackSpeed}
+                onChange={(e) => {
+                  setDraftVoicePlaybackSpeed(parseFloat(e.target.value));
+                }}
+                onMouseUp={commitVoicePlaybackSpeed}
+                onTouchEnd={commitVoicePlaybackSpeed}
+                onKeyUp={(e) => {
+                  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                    commitVoicePlaybackSpeed();
+                  }
+                }}
+                className="w-24 h-2 rounded-lg appearance-none cursor-pointer bg-background-neutral-02"
+              />
+              <span className="text-sm text-text-02 w-10">
+                {draftVoicePlaybackSpeed.toFixed(1)}x
+              </span>
+            </div>
+          </InputLayouts.Horizontal>
         </Card>
       </Section>
     </Section>
@@ -1096,7 +1226,10 @@ function AccountsAccessSettings() {
           title="Revoke Access Token"
           onClose={() => setTokenToDelete(null)}
           submit={
-            <Button danger onClick={() => deletePAT(tokenToDelete.id)}>
+            <Button
+              variant="danger"
+              onClick={() => deletePAT(tokenToDelete.id)}
+            >
               Revoke
             </Button>
           }
@@ -1141,19 +1274,20 @@ function AccountsAccessSettings() {
                 icon={SvgLock}
                 title="Change Password"
                 submit={
-                  <Button
-                    disabled={isSubmitting || !dirty || !isValid}
-                    onClick={async () => {
-                      setSubmitting(true);
-                      try {
-                        await handleChangePassword(values);
-                      } finally {
-                        setSubmitting(false);
-                      }
-                    }}
-                  >
-                    {isSubmitting ? "Updating..." : "Update"}
-                  </Button>
+                  <Disabled disabled={isSubmitting || !dirty || !isValid}>
+                    <Button
+                      onClick={async () => {
+                        setSubmitting(true);
+                        try {
+                          await handleChangePassword(values);
+                        } finally {
+                          setSubmitting(false);
+                        }
+                      }}
+                    >
+                      {isSubmitting ? "Updating..." : "Update"}
+                    </Button>
+                  </Disabled>
                 }
                 onClose={() => {
                   setShowPasswordModal(false);
@@ -1215,7 +1349,12 @@ function AccountsAccessSettings() {
 
       <Section gap={2}>
         <Section gap={0.75}>
-          <InputLayouts.Title title="Accounts" />
+          <Content
+            title="Accounts"
+            sizePreset="main-content"
+            variant="section"
+            widthVariant="full"
+          />
           <Card>
             <InputLayouts.Horizontal
               title="Email"
@@ -1233,10 +1372,10 @@ function AccountsAccessSettings() {
                 center
               >
                 <Button
-                  secondary
-                  leftIcon={SvgLock}
+                  prominence="secondary"
+                  icon={SvgLock}
                   onClick={() => setShowPasswordModal(true)}
-                  transient={showPasswordModal}
+                  interaction={showPasswordModal ? "hover" : "rest"}
                 >
                   Change Password
                 </Button>
@@ -1247,7 +1386,12 @@ function AccountsAccessSettings() {
 
         {showTokensSection && (
           <Section gap={0.75}>
-            <InputLayouts.Title title="Access Tokens" />
+            <Content
+              title="Access Tokens"
+              sizePreset="main-content"
+              variant="section"
+              widthVariant="full"
+            />
             {canCreateTokens ? (
               <Card padding={0.25}>
                 <Section gap={0}>
@@ -1318,7 +1462,7 @@ function AccountsAccessSettings() {
                               description={pat.token_display}
                               middleText={middleText}
                               rightChildren={
-                                <OpalButton
+                                <Button
                                   icon={SvgTrash}
                                   onClick={() => setTokenToDelete(pat)}
                                   prominence="tertiary"
@@ -1340,7 +1484,7 @@ function AccountsAccessSettings() {
                   <Text text03 secondaryBody>
                     Access tokens require an active paid subscription.
                   </Text>
-                  <Button secondary href="/admin/billing">
+                  <Button prominence="secondary" href="/admin/billing">
                     Upgrade Plan
                   </Button>
                 </Section>
@@ -1363,10 +1507,12 @@ function IndexedConnectorCard({ source, isActive }: IndexedConnectorCardProps) {
 
   return (
     <Card>
-      <LineItemLayout
+      <Content
         icon={sourceMetadata.icon}
         title={sourceMetadata.displayName}
         description={isActive ? "Connected" : "Paused"}
+        sizePreset="main-content"
+        variant="section"
       />
     </Card>
   );
@@ -1416,13 +1562,11 @@ function FederatedConnectorCard({
           title={`Disconnect ${sourceMetadata.displayName}`}
           onClose={() => setShowDisconnectConfirmation(false)}
           submit={
-            <Button
-              danger
-              onClick={() => void handleDisconnect()}
-              disabled={isDisconnecting}
-            >
-              {isDisconnecting ? "Disconnecting..." : "Disconnect"}
-            </Button>
+            <Disabled disabled={isDisconnecting}>
+              <Button variant="danger" onClick={() => void handleDisconnect()}>
+                {isDisconnecting ? "Disconnecting..." : "Disconnect"}
+              </Button>
+            </Disabled>
           }
         >
           <Section gap={0.5} alignItems="start">
@@ -1440,33 +1584,36 @@ function FederatedConnectorCard({
       )}
 
       <Card padding={0.5}>
-        <LineItemLayout
+        <ContentAction
           icon={sourceMetadata.icon}
           title={sourceMetadata.displayName}
           description={
             connector.has_oauth_token ? "Connected" : "Not connected"
           }
+          sizePreset="main-content"
+          variant="section"
+          paddingVariant="sm"
           rightChildren={
             connector.has_oauth_token ? (
-              <OpalButton
-                icon={SvgUnplug}
-                prominence="tertiary"
-                size="sm"
-                onClick={() => setShowDisconnectConfirmation(true)}
-                disabled={isDisconnecting}
-              />
+              <Disabled disabled={isDisconnecting}>
+                <Button
+                  icon={SvgUnplug}
+                  prominence="tertiary"
+                  size="sm"
+                  onClick={() => setShowDisconnectConfirmation(true)}
+                />
+              </Disabled>
             ) : connector.authorize_url ? (
               <Button
+                prominence="internal"
                 href={connector.authorize_url}
                 target="_blank"
-                internal
                 rightIcon={SvgArrowExchange}
               >
                 Connect
               </Button>
             ) : undefined
           }
-          reducedPadding
         />
       </Card>
     </>
@@ -1515,7 +1662,12 @@ function ConnectorsSettings() {
   return (
     <Section gap={2}>
       <Section gap={0.75} justifyContent="start">
-        <InputLayouts.Title title="Connectors" />
+        <Content
+          title="Connectors"
+          sizePreset="main-content"
+          variant="section"
+          widthVariant="full"
+        />
         {hasConnectors ? (
           <>
             {/* Indexed Connectors */}

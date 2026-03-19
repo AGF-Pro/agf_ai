@@ -4,7 +4,6 @@ from collections import deque
 from collections.abc import Callable
 from collections.abc import Generator
 from typing import Any
-from urllib.parse import unquote
 from urllib.parse import urlparse
 
 import requests as _requests
@@ -62,8 +61,7 @@ def _graph_api_get(
             ):
                 wait = min(int(resp.headers.get("Retry-After", str(2**attempt))), 60)
                 logger.warning(
-                    f"Graph API {resp.status_code} on attempt {attempt + 1}, "
-                    f"retrying in {wait}s: {url}"
+                    f"Graph API {resp.status_code} on attempt {attempt + 1}, retrying in {wait}s: {url}"
                 )
                 time.sleep(wait)
                 continue
@@ -73,8 +71,7 @@ def _graph_api_get(
             if attempt < GRAPH_API_MAX_RETRIES:
                 wait = min(2**attempt, 60)
                 logger.warning(
-                    f"Graph API connection error on attempt {attempt + 1}, "
-                    f"retrying in {wait}s: {url}"
+                    f"Graph API connection error on attempt {attempt + 1}, retrying in {wait}s: {url}"
                 )
                 time.sleep(wait)
                 continue
@@ -598,8 +595,12 @@ def get_external_access_from_sharepoint(
         )
     elif site_page:
         site_url = site_page.get("webUrl")
-        # Prefer server-relative URL to avoid OData filters that break on apostrophes
-        server_relative_url = unquote(urlparse(site_url).path)
+        # Keep percent-encoding intact so the path matches the encoding
+        # used by the Office365 library's SPResPath.create_relative(),
+        # which compares against urlparse(context.base_url).path.
+        # Decoding (e.g. %27 → ') causes a mismatch that duplicates
+        # the site prefix in the constructed URL.
+        server_relative_url = urlparse(site_url).path
         file_obj = client_context.web.get_file_by_server_relative_url(
             server_relative_url
         )
@@ -764,8 +765,7 @@ def get_sharepoint_external_groups(
 
     if not enumerate_all_ad_groups or get_access_token is None:
         logger.info(
-            "Skipping exhaustive Azure AD group enumeration. "
-            "Only groups found in site role assignments are included."
+            "Skipping exhaustive Azure AD group enumeration. Only groups found in site role assignments are included."
         )
         return external_user_groups
 

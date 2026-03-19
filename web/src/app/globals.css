@@ -16,6 +16,7 @@
 @import "css/sizes.css";
 @import "css/square-button.css";
 @import "css/switch.css";
+@import "css/table.css";
 @import "css/z-index.css";
 
 /* KH Teka Font */
@@ -157,6 +158,15 @@
     box-shadow:
       0px 2px 24px 0px var(--shadow-03),
       0px 0px 12px 1px var(--shadow-03);
+  }
+
+  /* RADIAL GRADIENTS */
+  .radial-00 {
+    background: radial-gradient(
+      236.31% 141.42% at 0% 0%,
+      var(--background-tint-00) 0%,
+      var(--background-tint-01) 100%
+    );
   }
 
   /* DEBUGGING UTILITIES
@@ -554,6 +564,21 @@ textarea {
 
 .animate-fadeIn {
   animation: fadeIn 0.2s ease-out forwards;
+}
+
+/* Recording waveform animation */
+@keyframes waveform {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.animate-waveform {
+  animation: waveform 0.8s ease-in-out infinite;
 }
 
 .container {

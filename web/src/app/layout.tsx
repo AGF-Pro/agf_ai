@@ -12,7 +12,7 @@ import {
   MODAL_ROOT_ID,
 } from "@/lib/constants";
 import { Metadata } from "next";
-import { buildClientUrl } from "@/lib/utilsSS";
+
 import { Inter } from "next/font/google";
 import { EnterpriseSettings, ApplicationStatus } from "@/interfaces/settings";
 import AppProvider from "@/providers/AppProvider";
@@ -30,6 +30,7 @@ import GatedContentWrapper from "@/components/GatedContentWrapper";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { fetchAppSidebarMetadata } from "@/lib/appSidebarSS";
 import StatsOverlayLoader from "@/components/dev/StatsOverlayLoader";
+import AppHealthBanner from "@/sections/AppHealthBanner";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -44,14 +45,14 @@ const hankenGrotesk = Hanken_Grotesk({
 });
 
 export async function generateMetadata(): Promise<Metadata> {
-  let logoLocation = buildClientUrl("/onyx.ico");
+  let logoLocation = "/onyx.ico";
   let enterpriseSettings: EnterpriseSettings | null = null;
   if (SERVER_SIDE_ONLY__PAID_ENTERPRISE_FEATURES_ENABLED) {
     enterpriseSettings = await (await fetchEnterpriseSettingsSS()).json();
     logoLocation =
       enterpriseSettings && enterpriseSettings.use_custom_logo
         ? "/api/enterprise-settings/logo"
-        : buildClientUrl("/onyx.ico");
+        : "/onyx.ico";
   }
 
   return {
@@ -128,7 +129,10 @@ export default async function RootLayout({
         >
           <div className="text-text min-h-screen bg-background">
             <TooltipProvider>
-              <PHProvider>{content}</PHProvider>
+              <PHProvider>
+                <AppHealthBanner />
+                {content}
+              </PHProvider>
             </TooltipProvider>
           </div>
         </ThemeProvider>
@@ -150,7 +154,8 @@ export default async function RootLayout({
   // middleware returns 402 for all non-allowlisted API calls, preventing data
   // leakage. The user sees a brief loading state before being redirected.
   const content =
-    productGating === ApplicationStatus.GATED_ACCESS ? (
+    productGating === ApplicationStatus.GATED_ACCESS ||
+    productGating === ApplicationStatus.SEAT_LIMIT_EXCEEDED ? (
       <GatedContentWrapper>{children}</GatedContentWrapper>
     ) : (
       children

@@ -7,16 +7,28 @@ from uuid import UUID
 
 from onyx.configs.app_configs import DEFAULT_OPENSEARCH_QUERY_TIMEOUT_S
 from onyx.configs.app_configs import OPENSEARCH_EXPLAIN_ENABLED
+from onyx.configs.app_configs import OPENSEARCH_MATCH_HIGHLIGHTS_DISABLED
 from onyx.configs.app_configs import OPENSEARCH_PROFILING_DISABLED
 from onyx.configs.constants import DocumentSource
 from onyx.configs.constants import INDEX_SEPARATOR
 from onyx.context.search.models import IndexFilters
 from onyx.context.search.models import Tag
 from onyx.document_index.interfaces_new import TenantState
+from onyx.document_index.opensearch.constants import ASSUMED_DOCUMENT_AGE_DAYS
 from onyx.document_index.opensearch.constants import (
-    DEFAULT_NUM_HYBRID_SEARCH_CANDIDATES,
+    DEFAULT_NUM_HYBRID_SUBQUERY_CANDIDATES,
 )
-from onyx.document_index.opensearch.constants import HYBRID_SEARCH_NORMALIZATION_WEIGHTS
+from onyx.document_index.opensearch.constants import (
+    DEFAULT_OPENSEARCH_MAX_RESULT_WINDOW,
+)
+from onyx.document_index.opensearch.constants import (
+    HYBRID_SEARCH_NORMALIZATION_PIPELINE,
+)
+from onyx.document_index.opensearch.constants import (
+    HYBRID_SEARCH_SUBQUERY_CONFIGURATION,
+)
+from onyx.document_index.opensearch.constants import HybridSearchNormalizationPipeline
+from onyx.document_index.opensearch.constants import HybridSearchSubqueryConfiguration
 from onyx.document_index.opensearch.schema import ACCESS_CONTROL_LIST_FIELD_NAME
 from onyx.document_index.opensearch.schema import ANCESTOR_HIERARCHY_NODE_IDS_FIELD_NAME
 from onyx.document_index.opensearch.schema import CHUNK_INDEX_FIELD_NAME
@@ -28,6 +40,7 @@ from onyx.document_index.opensearch.schema import HIDDEN_FIELD_NAME
 from onyx.document_index.opensearch.schema import LAST_UPDATED_FIELD_NAME
 from onyx.document_index.opensearch.schema import MAX_CHUNK_SIZE_FIELD_NAME
 from onyx.document_index.opensearch.schema import METADATA_LIST_FIELD_NAME
+from onyx.document_index.opensearch.schema import PERSONAS_FIELD_NAME
 from onyx.document_index.opensearch.schema import PUBLIC_FIELD_NAME
 from onyx.document_index.opensearch.schema import set_or_convert_timezone_to_utc
 from onyx.document_index.opensearch.schema import SOURCE_TYPE_FIELD_NAME
@@ -42,49 +55,113 @@ from onyx.document_index.opensearch.schema import USER_PROJECTS_FIELD_NAME
 
 # TODO(andrei): Turn all magic dictionaries to pydantic models.
 
-MIN_MAX_NORMALIZATION_PIPELINE_NAME = "normalization_pipeline_min_max"
-MIN_MAX_NORMALIZATION_PIPELINE_CONFIG: dict[str, Any] = {
-    "description": "Normalization for keyword and vector scores using min-max",
-    "phase_results_processors": [
-        {
-            # https://docs.opensearch.org/latest/search-plugins/search-pipelines/normalization-processor/
-            "normalization-processor": {
-                "normalization": {"technique": "min_max"},
-                "combination": {
-                    "technique": "arithmetic_mean",
-                    "parameters": {"weights": HYBRID_SEARCH_NORMALIZATION_WEIGHTS},
-                },
+
+def _get_hybrid_search_normalization_weights() -> list[float]:
+    if (
+        HYBRID_SEARCH_SUBQUERY_CONFIGURATION
+        is HybridSearchSubqueryConfiguration.TITLE_VECTOR_CONTENT_VECTOR_TITLE_CONTENT_COMBINED_KEYWORD
+    ):
+        # Since the titles are included in the contents, the embedding matches
+        # are heavily downweighted as they act as a boost rather than an
+        # independent scoring component.
+        search_title_vector_weight = 0.1
+        search_content_vector_weight = 0.45
+        # Single keyword weight for both title and content (merged from former
+        # title keyword + content keyword).
+        search_keyword_weight = 0.45
+
+        # NOTE: It is critical that the order of these weights matches the order
+        # of the sub-queries in the hybrid search.
+        hybrid_search_normalization_weights = [
+            search_title_vector_weight,
+            search_content_vector_weight,
+            search_keyword_weight,
+        ]
+    elif (
+        HYBRID_SEARCH_SUBQUERY_CONFIGURATION
+        is HybridSearchSubqueryConfiguration.CONTENT_VECTOR_TITLE_CONTENT_COMBINED_KEYWORD
+    ):
+        search_content_vector_weight = 0.5
+        # Single keyword weight for both title and content (merged from former
+        # title keyword + content keyword).
+        search_keyword_weight = 0.5
+
+        # NOTE: It is critical that the order of these weights matches the order
+        # of the sub-queries in the hybrid search.
+        hybrid_search_normalization_weights = [
+            search_content_vector_weight,
+            search_keyword_weight,
+        ]
+    else:
+        raise ValueError(
+            f"Bug: Unhandled hybrid search subquery configuration: {HYBRID_SEARCH_SUBQUERY_CONFIGURATION}."
+        )
+
+    assert (
+        sum(hybrid_search_normalization_weights) == 1.0
+    ), "Bug: Hybrid search normalization weights do not sum to 1.0."
+
+    return hybrid_search_normalization_weights
+
+
+def get_min_max_normalization_pipeline_name_and_config() -> tuple[str, dict[str, Any]]:
+    min_max_normalization_pipeline_name = "normalization_pipeline_min_max"
+    min_max_normalization_pipeline_config: dict[str, Any] = {
+        "description": "Normalization for keyword and vector scores using min-max",
+        "phase_results_processors": [
+            {
+                # https://docs.opensearch.org/latest/search-plugins/search-pipelines/normalization-processor/
+                "normalization-processor": {
+                    "normalization": {"technique": "min_max"},
+                    "combination": {
+                        "technique": "arithmetic_mean",
+                        "parameters": {
+                            "weights": _get_hybrid_search_normalization_weights()
+                        },
+                    },
+                }
             }
-        }
-    ],
-}
+        ],
+    }
+    return min_max_normalization_pipeline_name, min_max_normalization_pipeline_config
 
-ZSCORE_NORMALIZATION_PIPELINE_NAME = "normalization_pipeline_zscore"
-ZSCORE_NORMALIZATION_PIPELINE_CONFIG: dict[str, Any] = {
-    "description": "Normalization for keyword and vector scores using z-score",
-    "phase_results_processors": [
-        {
-            # https://docs.opensearch.org/latest/search-plugins/search-pipelines/normalization-processor/
-            "normalization-processor": {
-                "normalization": {"technique": "z_score"},
-                "combination": {
-                    "technique": "arithmetic_mean",
-                    "parameters": {"weights": HYBRID_SEARCH_NORMALIZATION_WEIGHTS},
-                },
+
+def get_zscore_normalization_pipeline_name_and_config() -> tuple[str, dict[str, Any]]:
+    zscore_normalization_pipeline_name = "normalization_pipeline_zscore"
+    zscore_normalization_pipeline_config: dict[str, Any] = {
+        "description": "Normalization for keyword and vector scores using z-score",
+        "phase_results_processors": [
+            {
+                # https://docs.opensearch.org/latest/search-plugins/search-pipelines/normalization-processor/
+                "normalization-processor": {
+                    "normalization": {"technique": "z_score"},
+                    "combination": {
+                        "technique": "arithmetic_mean",
+                        "parameters": {
+                            "weights": _get_hybrid_search_normalization_weights()
+                        },
+                    },
+                }
             }
-        }
-    ],
-}
+        ],
+    }
+    return zscore_normalization_pipeline_name, zscore_normalization_pipeline_config
 
 
-# By default OpenSearch will only return a maximum of this many results in a
-# given search. This value is configurable in the index settings.
-DEFAULT_OPENSEARCH_MAX_RESULT_WINDOW = 10_000
-
-# For documents which do not have a value for LAST_UPDATED_FIELD_NAME, we assume
-# that the document was last updated this many days ago for the purpose of time
-# cutoff filtering during retrieval.
-ASSUMED_DOCUMENT_AGE_DAYS = 90
+def get_normalization_pipeline_name_and_config() -> tuple[str, dict[str, Any]]:
+    if (
+        HYBRID_SEARCH_NORMALIZATION_PIPELINE
+        is HybridSearchNormalizationPipeline.MIN_MAX
+    ):
+        return get_min_max_normalization_pipeline_name_and_config()
+    elif (
+        HYBRID_SEARCH_NORMALIZATION_PIPELINE is HybridSearchNormalizationPipeline.ZSCORE
+    ):
+        return get_zscore_normalization_pipeline_name_and_config()
+    else:
+        raise ValueError(
+            f"Bug: Unhandled hybrid search normalization pipeline: {HYBRID_SEARCH_NORMALIZATION_PIPELINE}."
+        )
 
 
 class DocumentQuery:
@@ -144,6 +221,7 @@ class DocumentQuery:
             document_sets=index_filters.document_set or [],
             user_file_ids=index_filters.user_file_ids or [],
             project_id=index_filters.project_id,
+            persona_id=index_filters.persona_id,
             time_cutoff=index_filters.time_cutoff,
             min_chunk_index=min_chunk_index,
             max_chunk_index=max_chunk_index,
@@ -158,9 +236,17 @@ class DocumentQuery:
             # returning some number of results less than the index max allowed
             # return size.
             "size": DEFAULT_OPENSEARCH_MAX_RESULT_WINDOW,
-            "_source": get_full_document,
+            # By default exclude retrieving the vector fields in order to save
+            # on retrieval cost as we don't need them upstream.
+            "_source": {
+                "excludes": [TITLE_VECTOR_FIELD_NAME, CONTENT_VECTOR_FIELD_NAME]
+            },
             "timeout": f"{DEFAULT_OPENSEARCH_QUERY_TIMEOUT_S}s",
         }
+        if not get_full_document:
+            # If we explicitly do not want the underlying document, we will only
+            # retrieve IDs.
+            final_get_ids_query["_source"] = False
         if not OPENSEARCH_PROFILING_DISABLED:
             final_get_ids_query["profile"] = True
 
@@ -202,6 +288,7 @@ class DocumentQuery:
             document_sets=[],
             user_file_ids=[],
             project_id=None,
+            persona_id=None,
             time_cutoff=None,
             min_chunk_index=None,
             max_chunk_index=None,
@@ -252,8 +339,12 @@ class DocumentQuery:
                 f"result window ({DEFAULT_OPENSEARCH_MAX_RESULT_WINDOW})."
             )
 
+        # TODO(andrei, yuhong): We can tune this more dynamically based on
+        # num_hits.
+        max_results_per_subquery = DEFAULT_NUM_HYBRID_SUBQUERY_CANDIDATES
+
         hybrid_search_subqueries = DocumentQuery._get_hybrid_search_subqueries(
-            query_text, query_vector
+            query_text, query_vector, vector_candidates=max_results_per_subquery
         )
         hybrid_search_filters = DocumentQuery._get_search_filters(
             tenant_state=tenant_state,
@@ -267,27 +358,28 @@ class DocumentQuery:
             document_sets=index_filters.document_set or [],
             user_file_ids=index_filters.user_file_ids or [],
             project_id=index_filters.project_id,
+            persona_id=index_filters.persona_id,
             time_cutoff=index_filters.time_cutoff,
             min_chunk_index=None,
             max_chunk_index=None,
             attached_document_ids=index_filters.attached_document_ids,
             hierarchy_node_ids=index_filters.hierarchy_node_ids,
         )
-        match_highlights_configuration = (
-            DocumentQuery._get_match_highlights_configuration()
-        )
 
         # See https://docs.opensearch.org/latest/query-dsl/compound/hybrid/
         hybrid_search_query: dict[str, Any] = {
             "hybrid": {
                 "queries": hybrid_search_subqueries,
-                # Max results per subquery per shard before aggregation. Ensures keyword and vector
-                # subqueries contribute equally to the candidate pool for hybrid fusion.
+                # Max results per subquery per shard before aggregation. Ensures
+                # keyword and vector subqueries contribute equally to the
+                # candidate pool for hybrid fusion.
                 # Sources:
                 # https://docs.opensearch.org/latest/vector-search/ai-search/hybrid-search/pagination/
                 # https://opensearch.org/blog/navigating-pagination-in-hybrid-queries-with-the-pagination_depth-parameter/
-                "pagination_depth": DEFAULT_NUM_HYBRID_SEARCH_CANDIDATES,
-                # Applied to all the sub-queries independently (this avoids having subqueries having a lot of results thrown out).
+                "pagination_depth": max_results_per_subquery,
+                # Applied to all the sub-queries independently (this avoids
+                # subqueries having a lot of results thrown out during
+                # aggregation).
                 # Sources:
                 # https://docs.opensearch.org/latest/query-dsl/compound/hybrid/
                 # https://opensearch.org/blog/introducing-common-filter-support-for-hybrid-search-queries
@@ -299,9 +391,18 @@ class DocumentQuery:
         final_hybrid_search_body: dict[str, Any] = {
             "query": hybrid_search_query,
             "size": num_hits,
-            "highlight": match_highlights_configuration,
             "timeout": f"{DEFAULT_OPENSEARCH_QUERY_TIMEOUT_S}s",
+            # Exclude retrieving the vector fields in order to save on
+            # retrieval cost as we don't need them upstream.
+            "_source": {
+                "excludes": [TITLE_VECTOR_FIELD_NAME, CONTENT_VECTOR_FIELD_NAME]
+            },
         }
+
+        if not OPENSEARCH_MATCH_HIGHLIGHTS_DISABLED:
+            final_hybrid_search_body["highlight"] = (
+                DocumentQuery._get_match_highlights_configuration()
+            )
 
         # Explain is for scoring breakdowns.
         if OPENSEARCH_EXPLAIN_ENABLED:
@@ -334,6 +435,7 @@ class DocumentQuery:
             document_sets=index_filters.document_set or [],
             user_file_ids=index_filters.user_file_ids or [],
             project_id=index_filters.project_id,
+            persona_id=index_filters.persona_id,
             time_cutoff=index_filters.time_cutoff,
             min_chunk_index=None,
             max_chunk_index=None,
@@ -359,6 +461,11 @@ class DocumentQuery:
             },
             "size": num_to_retrieve,
             "timeout": f"{DEFAULT_OPENSEARCH_QUERY_TIMEOUT_S}s",
+            # Exclude retrieving the vector fields in order to save on
+            # retrieval cost as we don't need them upstream.
+            "_source": {
+                "excludes": [TITLE_VECTOR_FIELD_NAME, CONTENT_VECTOR_FIELD_NAME]
+            },
         }
         if not OPENSEARCH_PROFILING_DISABLED:
             final_random_search_query["profile"] = True
@@ -369,10 +476,11 @@ class DocumentQuery:
     def _get_hybrid_search_subqueries(
         query_text: str,
         query_vector: list[float],
-        # The default number of neighbors to consider for knn vector similarity search.
-        # This is higher than the number of results because the scoring is hybrid.
-        # for a detailed breakdown, see where the default value is set.
-        vector_candidates: int = DEFAULT_NUM_HYBRID_SEARCH_CANDIDATES,
+        # The default number of neighbors to consider for knn vector similarity
+        # search. This is higher than the number of results because the scoring
+        # is hybrid. For a detailed breakdown, see where the default value is
+        # set.
+        vector_candidates: int = DEFAULT_NUM_HYBRID_SUBQUERY_CANDIDATES,
     ) -> list[dict[str, Any]]:
         """Returns subqueries for hybrid search.
 
@@ -382,33 +490,38 @@ class DocumentQuery:
         The return of this function is not sufficient to be directly supplied to
         the OpenSearch client. See get_hybrid_search_query.
 
-        Matches:
-          - Title vector
-          - Content vector
-          - Keyword (title + content, match and phrase)
-
         Normalization is not performed here.
         The weights of each of these subqueries should be configured in a search
         pipeline.
+
+        The exact subqueries executed depend on the
+        HYBRID_SEARCH_SUBQUERY_CONFIGURATION setting.
 
         NOTE: For OpenSearch, 5 is the maximum number of query clauses allowed
         in a single hybrid query. Source:
         https://docs.opensearch.org/latest/query-dsl/compound/hybrid/
 
-        NOTE: Each query is independent during the search phase, there is no backfilling of scores for missing query components.
-        What this means is that if a document was a good vector match but did not show up for keyword, it gets a score of 0 for
-        the keyword component of the hybrid scoring. This is not as bad as just disregarding a score though as there is
-        normalization applied after. So really it is "increasing" the missing score compared to if it was included and the range
-        was renormalized. This does however mean that between docs that have high scores for say the vector field, the keyword
-        scores between them are completely ignored unless they also showed up in the keyword query as a reasonably high match.
-        TLDR, this is a bit of unique funky behavior but it seems ok.
+        NOTE: Each query is independent during the search phase; there is no
+        backfilling of scores for missing query components. What this means is
+        that if a document was a good vector match but did not show up for
+        keyword, it gets a score of 0 for the keyword component of the hybrid
+        scoring. This is not as bad as just disregarding a score though as there
+        is normalization applied after. So really it is "increasing" the missing
+        score compared to if it was included and the range was renormalized.
+        This does however mean that between docs that have high scores for say
+        the vector field, the keyword scores between them are completely ignored
+        unless they also showed up in the keyword query as a reasonably high
+        match. TLDR, this is a bit of unique funky behavior but it seems ok.
 
         NOTE: Options considered and rejected:
-        - minimum_should_match: Since it's hybrid search and users often provide semantic queries, there is often a lot of terms,
-          and very low number of meaningful keywords (and a low ratio of keywords).
-        - fuzziness AUTO: typo tolerance (0/1/2 edit distance by term length). It's mostly for typos as the analyzer ("english by
-          default") already does some stemming and tokenization. In testing datasets, this makes recall slightly worse. It also is
-          less performant so not really any reason to do it.
+        - minimum_should_match: Since it's hybrid search and users often provide
+          semantic queries, there is often a lot of terms, and very low number
+          of meaningful keywords (and a low ratio of keywords).
+        - fuzziness AUTO: Typo tolerance (0/1/2 edit distance by term length).
+          It's mostly for typos as the analyzer ("english" by default) already
+          does some stemming and tokenization. In testing datasets, this makes
+          recall slightly worse. It also is less performant so not really any
+          reason to do it.
 
         Args:
             query_text: The text of the query to search for.
@@ -417,74 +530,115 @@ class DocumentQuery:
                 similarity search.
         """
         # Build sub-queries for hybrid search. Order must match normalization
-        # pipeline weights: title vector, content vector, keyword (title + content).
-        hybrid_search_queries: list[dict[str, Any]] = [
-            # 1. Title vector search
-            {
-                "knn": {
-                    TITLE_VECTOR_FIELD_NAME: {
-                        "vector": query_vector,
-                        "k": vector_candidates,
-                    }
-                }
-            },
-            # 2. Content vector search
-            {
-                "knn": {
-                    CONTENT_VECTOR_FIELD_NAME: {
-                        "vector": query_vector,
-                        "k": vector_candidates,
-                    }
-                }
-            },
-            # 3. Keyword (title + content) match and phrase search.
-            {
-                "bool": {
-                    "should": [
-                        {
-                            "match": {
-                                TITLE_FIELD_NAME: {
-                                    "query": query_text,
-                                    "operator": "or",
-                                    # The title fields are strongly discounted as they are included in the content.
-                                    # It just acts as a minor boost
-                                    "boost": 0.1,
-                                }
-                            }
-                        },
-                        {
-                            "match_phrase": {
-                                TITLE_FIELD_NAME: {
-                                    "query": query_text,
-                                    "slop": 1,
-                                    "boost": 0.2,
-                                }
-                            }
-                        },
-                        {
-                            "match": {
-                                CONTENT_FIELD_NAME: {
-                                    "query": query_text,
-                                    "operator": "or",
-                                    "boost": 1.0,
-                                }
-                            }
-                        },
-                        {
-                            "match_phrase": {
-                                CONTENT_FIELD_NAME: {
-                                    "query": query_text,
-                                    "slop": 1,
-                                    "boost": 1.5,
-                                }
-                            }
-                        },
-                    ]
-                }
-            },
-        ]
+        # pipeline weights.
+        if (
+            HYBRID_SEARCH_SUBQUERY_CONFIGURATION
+            is HybridSearchSubqueryConfiguration.TITLE_VECTOR_CONTENT_VECTOR_TITLE_CONTENT_COMBINED_KEYWORD
+        ):
+            return [
+                DocumentQuery._get_title_vector_similarity_search_query(
+                    query_vector, vector_candidates
+                ),
+                DocumentQuery._get_content_vector_similarity_search_query(
+                    query_vector, vector_candidates
+                ),
+                DocumentQuery._get_title_content_combined_keyword_search_query(
+                    query_text
+                ),
+            ]
+        elif (
+            HYBRID_SEARCH_SUBQUERY_CONFIGURATION
+            is HybridSearchSubqueryConfiguration.CONTENT_VECTOR_TITLE_CONTENT_COMBINED_KEYWORD
+        ):
+            return [
+                DocumentQuery._get_content_vector_similarity_search_query(
+                    query_vector, vector_candidates
+                ),
+                DocumentQuery._get_title_content_combined_keyword_search_query(
+                    query_text
+                ),
+            ]
+        else:
+            raise ValueError(
+                f"Bug: Unhandled hybrid search subquery configuration: {HYBRID_SEARCH_SUBQUERY_CONFIGURATION}"
+            )
 
-        return hybrid_search_queries
+    @staticmethod
+    def _get_title_vector_similarity_search_query(
+        query_vector: list[float],
+        vector_candidates: int = DEFAULT_NUM_HYBRID_SUBQUERY_CANDIDATES,
+    ) -> dict[str, Any]:
+        return {
+            "knn": {
+                TITLE_VECTOR_FIELD_NAME: {
+                    "vector": query_vector,
+                    "k": vector_candidates,
+                }
+            }
+        }
+
+    @staticmethod
+    def _get_content_vector_similarity_search_query(
+        query_vector: list[float],
+        vector_candidates: int = DEFAULT_NUM_HYBRID_SUBQUERY_CANDIDATES,
+    ) -> dict[str, Any]:
+        return {
+            "knn": {
+                CONTENT_VECTOR_FIELD_NAME: {
+                    "vector": query_vector,
+                    "k": vector_candidates,
+                }
+            }
+        }
+
+    @staticmethod
+    def _get_title_content_combined_keyword_search_query(
+        query_text: str,
+    ) -> dict[str, Any]:
+        return {
+            "bool": {
+                "should": [
+                    {
+                        "match": {
+                            TITLE_FIELD_NAME: {
+                                "query": query_text,
+                                "operator": "or",
+                                # The title fields are strongly discounted as they are included in the content.
+                                # It just acts as a minor boost
+                                "boost": 0.1,
+                            }
+                        }
+                    },
+                    {
+                        "match_phrase": {
+                            TITLE_FIELD_NAME: {
+                                "query": query_text,
+                                "slop": 1,
+                                "boost": 0.2,
+                            }
+                        }
+                    },
+                    {
+                        "match": {
+                            CONTENT_FIELD_NAME: {
+                                "query": query_text,
+                                "operator": "or",
+                                "boost": 1.0,
+                            }
+                        }
+                    },
+                    {
+                        "match_phrase": {
+                            CONTENT_FIELD_NAME: {
+                                "query": query_text,
+                                "slop": 1,
+                                "boost": 1.5,
+                            }
+                        }
+                    },
+                ]
+            }
+        }
 
     @staticmethod
     def _get_search_filters(
@@ -496,6 +650,7 @@ class DocumentQuery:
         document_sets: list[str],
         user_file_ids: list[UUID],
         project_id: int | None,
+        persona_id: int | None,
         time_cutoff: datetime | None,
         min_chunk_index: int | None,
         max_chunk_index: int | None,
@@ -530,6 +685,8 @@ class DocumentQuery:
                 retrieved.
             project_id: If not None, only documents with this project ID in user
                 projects will be retrieved.
+            persona_id: If not None, only documents whose personas array
+                contains this persona ID will be retrieved.
             time_cutoff: Time cutoff for the documents to retrieve. If not None,
                 Documents which were last updated before this date will not be
                 returned. For documents which do not have a value for their last
@@ -627,6 +784,9 @@ class DocumentQuery:
             )
             return user_project_filter
 
+        def _get_persona_filter(persona_id: int) -> dict[str, Any]:
+            return {"term": {PERSONAS_FIELD_NAME: {"value": persona_id}}}
+
         def _get_time_cutoff_filter(time_cutoff: datetime) -> dict[str, Any]:
             # Convert to UTC if not already so the cutoff is comparable to the
             # document data.
@@ -687,41 +847,6 @@ class DocumentQuery:
             """
             return {"terms": {ANCESTOR_HIERARCHY_NODE_IDS_FIELD_NAME: node_ids}}
 
-        def _get_assistant_knowledge_filter(
-            attached_doc_ids: list[str] | None,
-            node_ids: list[int] | None,
-            file_ids: list[UUID] | None,
-            document_sets: list[str] | None,
-        ) -> dict[str, Any]:
-            """Combined filter for assistant knowledge.
-
-            When an assistant has attached knowledge, search should be scoped to:
-            - Documents explicitly attached (by document ID), OR
-            - Documents under attached hierarchy nodes (by ancestor node IDs), OR
-            - User-uploaded files attached to the assistant, OR
-            - Documents in the assistant's document sets (if any)
-            """
-            knowledge_filter: dict[str, Any] = {
-                "bool": {"should": [], "minimum_should_match": 1}
-            }
-            if attached_doc_ids:
-                knowledge_filter["bool"]["should"].append(
-                    _get_attached_document_id_filter(attached_doc_ids)
-                )
-            if node_ids:
-                knowledge_filter["bool"]["should"].append(
-                    _get_hierarchy_node_filter(node_ids)
-                )
-            if file_ids:
-                knowledge_filter["bool"]["should"].append(
-                    _get_user_file_id_filter(file_ids)
-                )
-            if document_sets:
-                knowledge_filter["bool"]["should"].append(
-                    _get_document_set_filter(document_sets)
-                )
-            return knowledge_filter
-
         filter_clauses: list[dict[str, Any]] = []
 
         if not include_hidden:
@@ -747,38 +872,51 @@ class DocumentQuery:
             # document's metadata list.
             filter_clauses.append(_get_tag_filter(tags))
 
-        # Check if this is an assistant knowledge search (has any assistant-scoped knowledge)
-        has_assistant_knowledge = (
+        # Knowledge scope: explicit knowledge attachments restrict what an
+        # assistant can see. When none are set the assistant searches
+        # everything.
+        #
+        # project_id / persona_id are additive: they make overflowing user files
+        # findable but must NOT trigger the restriction on their own (an agent
+        # with no explicit knowledge should search everything).
+        has_knowledge_scope = (
             attached_document_ids
             or hierarchy_node_ids
             or user_file_ids
             or document_sets
         )
 
-        if has_assistant_knowledge:
-            # If assistant has attached knowledge, scope search to that knowledge.
-            # Document sets are included in the OR filter so directly attached
-            # docs are always findable even if not in the document sets.
-            filter_clauses.append(
-                _get_assistant_knowledge_filter(
-                    attached_document_ids,
-                    hierarchy_node_ids,
-                    user_file_ids,
-                    document_sets,
+        if has_knowledge_scope:
+            knowledge_filter: dict[str, Any] = {
+                "bool": {"should": [], "minimum_should_match": 1}
+            }
+            if attached_document_ids:
+                knowledge_filter["bool"]["should"].append(
+                    _get_attached_document_id_filter(attached_document_ids)
                 )
-            )
-        elif user_file_ids:
-            # Fallback for non-assistant user file searches (e.g., project searches)
-            # If at least one user file ID is provided, the caller will only
-            # retrieve documents where the document ID is in this input list of
-            # file IDs.
-            filter_clauses.append(_get_user_file_id_filter(user_file_ids))
-
-        if project_id is not None:
-            # If a project ID is provided, the caller will only retrieve
-            # documents where the project ID provided here is present in the
-            # document's user projects list.
-            filter_clauses.append(_get_user_project_filter(project_id))
+            if hierarchy_node_ids:
+                knowledge_filter["bool"]["should"].append(
+                    _get_hierarchy_node_filter(hierarchy_node_ids)
+                )
+            if user_file_ids:
+                knowledge_filter["bool"]["should"].append(
+                    _get_user_file_id_filter(user_file_ids)
+                )
+            if document_sets:
+                knowledge_filter["bool"]["should"].append(
+                    _get_document_set_filter(document_sets)
+                )
+            # Additive: widen scope to also cover overflowing user files, but
+            # only when an explicit restriction is already in effect.
+            if project_id is not None:
+                knowledge_filter["bool"]["should"].append(
+                    _get_user_project_filter(project_id)
+                )
+            if persona_id is not None:
+                knowledge_filter["bool"]["should"].append(
+                    _get_persona_filter(persona_id)
+                )
+            filter_clauses.append(knowledge_filter)
 
         if time_cutoff is not None:
             # If a time cutoff is provided, the caller will only retrieve

@@ -417,8 +417,7 @@ def restore_session(
 
             if not is_healthy:
                 logger.warning(
-                    f"Sandbox {sandbox.id} marked as RUNNING but pod is "
-                    f"unhealthy/missing. Entering recovery mode."
+                    f"Sandbox {sandbox.id} marked as RUNNING but pod is unhealthy/missing. Entering recovery mode."
                 )
                 # Terminate to clean up any lingering K8s resources
                 sandbox_manager.terminate(sandbox.id)
@@ -504,8 +503,7 @@ def restore_session(
                     db_session.commit()
         else:
             logger.warning(
-                f"Sandbox {sandbox.id} status is {sandbox.status} after "
-                f"re-provision, expected RUNNING"
+                f"Sandbox {sandbox.id} status is {sandbox.status} after re-provision, expected RUNNING"
             )
 
     except Exception as e:
@@ -732,7 +730,7 @@ def get_webapp_info(
     return WebappInfo(**webapp_info)
 
 
-@router.get("/{session_id}/webapp/download")
+@router.get("/{session_id}/webapp-download")
 def download_webapp(
     session_id: UUID,
     user: User = Depends(current_user),
@@ -750,6 +748,43 @@ def download_webapp(
 
     if result is None:
         raise HTTPException(status_code=404, detail="Webapp not found")
+
+    zip_bytes, filename = result
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@router.get("/{session_id}/download-directory/{path:path}")
+def download_directory(
+    session_id: UUID,
+    path: str,
+    user: User = Depends(current_user),
+    db_session: Session = Depends(get_session),
+) -> Response:
+    """
+    Download a directory as a zip file.
+
+    Returns the specified directory as a zip archive.
+    """
+    user_id: UUID = user.id
+    session_manager = SessionManager(db_session)
+
+    try:
+        result = session_manager.download_directory(session_id, user_id, path)
+    except ValueError as e:
+        error_message = str(e)
+        if "path traversal" in error_message.lower():
+            raise HTTPException(status_code=403, detail="Access denied")
+        raise HTTPException(status_code=400, detail=error_message)
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Directory not found")
 
     zip_bytes, filename = result
 

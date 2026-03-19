@@ -5,6 +5,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import cast
+from uuid import UUID
 
 import jwt
 from email_validator import EmailNotValidError
@@ -18,6 +19,7 @@ from fastapi import Query
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from onyx.auth.anonymous_user import fetch_anonymous_user_info
@@ -36,6 +38,7 @@ from onyx.configs.app_configs import AUTH_BACKEND
 from onyx.configs.app_configs import AUTH_TYPE
 from onyx.configs.app_configs import AuthBackend
 from onyx.configs.app_configs import DEV_MODE
+from onyx.configs.app_configs import EMAIL_CONFIGURED
 from onyx.configs.app_configs import ENABLE_EMAIL_INVITES
 from onyx.configs.app_configs import NUM_FREE_TRIAL_USER_INVITES
 from onyx.configs.app_configs import REDIS_AUTH_KEY_PREFIX
@@ -66,11 +69,14 @@ from onyx.db.user_preferences import update_user_role
 from onyx.db.user_preferences import update_user_shortcut_enabled
 from onyx.db.user_preferences import update_user_temperature_override_enabled
 from onyx.db.user_preferences import update_user_theme_preference
+from onyx.db.users import batch_get_user_groups
 from onyx.db.users import delete_user_from_db
+from onyx.db.users import get_all_accepted_users
 from onyx.db.users import get_all_users
 from onyx.db.users import get_page_of_filtered_users
 from onyx.db.users import get_total_filtered_users_count
 from onyx.db.users import get_user_by_email
+from onyx.db.users import get_user_counts_by_role_and_status
 from onyx.db.users import validate_user_role_update
 from onyx.key_value_store.factory import get_kv_store
 from onyx.redis.redis_pool import get_raw_redis_client
@@ -78,8 +84,10 @@ from onyx.server.documents.models import PaginatedReturn
 from onyx.server.features.projects.models import UserFileSnapshot
 from onyx.server.manage.models import AllUsersResponse
 from onyx.server.manage.models import AutoScrollRequest
+from onyx.server.manage.models import BulkInviteResponse
 from onyx.server.manage.models import ChatBackgroundRequest
 from onyx.server.manage.models import DefaultAppModeRequest
+from onyx.server.manage.models import EmailInviteStatus
 from onyx.server.manage.models import MemoryItem
 from onyx.server.manage.models import PersonalizationUpdateRequest
 from onyx.server.manage.models import TenantInfo
@@ -95,6 +103,7 @@ from onyx.server.manage.models import UserSpecificAssistantPreferences
 from onyx.server.models import FullUserSnapshot
 from onyx.server.models import InvitedUserSnapshot
 from onyx.server.models import MinimalUserSnapshot
+from onyx.server.models import UserGroupInfo
 from onyx.server.usage_limits import is_tenant_on_trial_fn
 from onyx.server.utils import BasicAuthenticationError
 from onyx.utils.logger import setup_logger
@@ -200,12 +209,89 @@ def list_accepted_users(
             total_items=0,
         )
 
+    user_ids = [user.id for user in filtered_accepted_users]
+    groups_by_user = batch_get_user_groups(db_session, user_ids)
+
+    # Batch-fetch SCIM mappings to mark synced users
+    scim_synced_ids: set[UUID] = set()
+    try:
+        from onyx.db.models import ScimUserMapping
+
+        scim_mappings = db_session.scalars(
+            select(ScimUserMapping.user_id).where(ScimUserMapping.user_id.in_(user_ids))
+        ).all()
+        scim_synced_ids = set(scim_mappings)
+    except Exception:
+        logger.warning(
+            "Failed to fetch SCIM mappings; marking all users as non-synced",
+            exc_info=True,
+        )
+
     return PaginatedReturn(
         items=[
-            FullUserSnapshot.from_user_model(user) for user in filtered_accepted_users
+            FullUserSnapshot.from_user_model(
+                user,
+                groups=[
+                    UserGroupInfo(id=gid, name=gname)
+                    for gid, gname in groups_by_user.get(user.id, [])
+                ],
+                is_scim_synced=user.id in scim_synced_ids,
+            )
+            for user in filtered_accepted_users
         ],
         total_items=total_accepted_users_count,
     )
+
+
+@router.get("/manage/users/accepted/all", tags=PUBLIC_API_TAGS)
+def list_all_accepted_users(
+    _: User = Depends(current_admin_user),
+    db_session: Session = Depends(get_session),
+) -> list[FullUserSnapshot]:
+    """Returns all accepted users without pagination.
+    Used by the admin Users page for client-side filtering/sorting."""
+    users = get_all_accepted_users(db_session=db_session)
+
+    if not users:
+        return []
+
+    user_ids = [user.id for user in users]
+    groups_by_user = batch_get_user_groups(db_session, user_ids)
+
+    # Batch-fetch SCIM mappings to mark synced users
+    scim_synced_ids: set[UUID] = set()
+    try:
+        from onyx.db.models import ScimUserMapping
+
+        scim_mappings = db_session.scalars(
+            select(ScimUserMapping.user_id).where(ScimUserMapping.user_id.in_(user_ids))
+        ).all()
+        scim_synced_ids = set(scim_mappings)
+    except Exception:
+        logger.warning(
+            "Failed to fetch SCIM mappings; marking all users as non-synced",
+            exc_info=True,
+        )
+
+    return [
+        FullUserSnapshot.from_user_model(
+            user,
+            groups=[
+                UserGroupInfo(id=gid, name=gname)
+                for gid, gname in groups_by_user.get(user.id, [])
+            ],
+            is_scim_synced=user.id in scim_synced_ids,
+        )
+        for user in users
+    ]
+
+
+@router.get("/manage/users/counts")
+def get_user_counts(
+    _: User = Depends(current_admin_user),
+    db_session: Session = Depends(get_session),
+) -> dict[str, dict[str, int]]:
+    return get_user_counts_by_role_and_status(db_session)
 
 
 @router.get("/manage/users/invited", tags=PUBLIC_API_TAGS)
@@ -266,24 +352,10 @@ def list_all_users(
     if accepted_page is None or invited_page is None or slack_users_page is None:
         return AllUsersResponse(
             accepted=[
-                FullUserSnapshot(
-                    id=user.id,
-                    email=user.email,
-                    role=user.role,
-                    is_active=user.is_active,
-                    password_configured=user.password_configured,
-                )
-                for user in accepted_users
+                FullUserSnapshot.from_user_model(user) for user in accepted_users
             ],
             slack_users=[
-                FullUserSnapshot(
-                    id=user.id,
-                    email=user.email,
-                    role=user.role,
-                    is_active=user.is_active,
-                    password_configured=user.password_configured,
-                )
-                for user in slack_users
+                FullUserSnapshot.from_user_model(user) for user in slack_users
             ],
             invited=[InvitedUserSnapshot(email=email) for email in invited_emails],
             accepted_pages=1,
@@ -293,26 +365,10 @@ def list_all_users(
 
     # Otherwise, return paginated results
     return AllUsersResponse(
-        accepted=[
-            FullUserSnapshot(
-                id=user.id,
-                email=user.email,
-                role=user.role,
-                is_active=user.is_active,
-                password_configured=user.password_configured,
-            )
-            for user in accepted_users
-        ][accepted_page * USERS_PAGE_SIZE : (accepted_page + 1) * USERS_PAGE_SIZE],
-        slack_users=[
-            FullUserSnapshot(
-                id=user.id,
-                email=user.email,
-                role=user.role,
-                is_active=user.is_active,
-                password_configured=user.password_configured,
-            )
-            for user in slack_users
-        ][
+        accepted=[FullUserSnapshot.from_user_model(user) for user in accepted_users][
+            accepted_page * USERS_PAGE_SIZE : (accepted_page + 1) * USERS_PAGE_SIZE
+        ],
+        slack_users=[FullUserSnapshot.from_user_model(user) for user in slack_users][
             slack_users_page
             * USERS_PAGE_SIZE : (slack_users_page + 1)
             * USERS_PAGE_SIZE
@@ -368,7 +424,7 @@ def bulk_invite_users(
     emails: list[str] = Body(..., embed=True),
     current_user: User = Depends(current_admin_user),
     db_session: Session = Depends(get_session),
-) -> int:
+) -> BulkInviteResponse:
     """emails are string validated. If any email fails validation, no emails are
     invited and an exception is raised."""
     tenant_id = get_current_tenant_id()
@@ -404,8 +460,7 @@ def bulk_invite_users(
         if current_invited + len(emails_needing_seats) > NUM_FREE_TRIAL_USER_INVITES:
             raise HTTPException(
                 status_code=403,
-                detail="You have hit your invite limit. "
-                "Please upgrade for unlimited invites.",
+                detail="You have hit your invite limit. Please upgrade for unlimited invites.",
             )
 
     # Check seat availability for new users
@@ -427,34 +482,41 @@ def bulk_invite_users(
     number_of_invited_users = write_invited_users(all_emails)
 
     # send out email invitations only to new users (not already invited or existing)
-    if ENABLE_EMAIL_INVITES:
+    if not ENABLE_EMAIL_INVITES:
+        email_invite_status = EmailInviteStatus.DISABLED
+    elif not EMAIL_CONFIGURED:
+        email_invite_status = EmailInviteStatus.NOT_CONFIGURED
+    else:
         try:
             for email in emails_needing_seats:
                 send_user_email_invite(email, current_user, AUTH_TYPE)
+            email_invite_status = EmailInviteStatus.SENT
         except Exception as e:
             logger.error(f"Error sending email invite to invited users: {e}")
+            email_invite_status = EmailInviteStatus.SEND_FAILED
 
-    if not MULTI_TENANT or DEV_MODE:
-        return number_of_invited_users
+    if MULTI_TENANT and not DEV_MODE:
+        # for billing purposes, write to the control plane about the number of new users
+        try:
+            logger.info("Registering tenant users")
+            fetch_ee_implementation_or_noop(
+                "onyx.server.tenants.billing", "register_tenant_users", None
+            )(tenant_id, get_live_users_count(db_session))
+        except Exception as e:
+            logger.error(f"Failed to register tenant users: {str(e)}")
+            logger.info(
+                "Reverting changes: removing users from tenant and resetting invited users"
+            )
+            write_invited_users(initial_invited_users)  # Reset to original state
+            fetch_ee_implementation_or_noop(
+                "onyx.server.tenants.user_mapping", "remove_users_from_tenant", None
+            )(new_invited_emails, tenant_id)
+            raise e
 
-    # for billing purposes, write to the control plane about the number of new users
-    try:
-        logger.info("Registering tenant users")
-        fetch_ee_implementation_or_noop(
-            "onyx.server.tenants.billing", "register_tenant_users", None
-        )(tenant_id, get_live_users_count(db_session))
-
-        return number_of_invited_users
-    except Exception as e:
-        logger.error(f"Failed to register tenant users: {str(e)}")
-        logger.info(
-            "Reverting changes: removing users from tenant and resetting invited users"
-        )
-        write_invited_users(initial_invited_users)  # Reset to original state
-        fetch_ee_implementation_or_noop(
-            "onyx.server.tenants.user_mapping", "remove_users_from_tenant", None
-        )(new_invited_emails, tenant_id)
-        raise e
+    return BulkInviteResponse(
+        invited_count=number_of_invited_users,
+        email_invite_status=email_invite_status,
+    )
 
 
 @router.patch("/manage/admin/remove-invited-user", tags=PUBLIC_API_TAGS)

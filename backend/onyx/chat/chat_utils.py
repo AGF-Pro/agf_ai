@@ -270,7 +270,10 @@ def extract_headers(
 
 
 def process_kg_commands(
-    message: str, persona_name: str, tenant_id: str, db_session: Session  # noqa: ARG001
+    message: str,
+    persona_name: str,
+    tenant_id: str,  # noqa: ARG001
+    db_session: Session,
 ) -> None:
     # Temporarily, until we have a draft UI for the KG Operations/Management
     # TODO: move to api endpoint once we get frontend
@@ -461,7 +464,7 @@ def _build_tool_call_response_history_message(
 def convert_chat_history(
     chat_history: list[ChatMessage],
     files: list[ChatLoadedFile],
-    project_image_files: list[ChatLoadedFile],
+    context_image_files: list[ChatLoadedFile],
     additional_context: str | None,
     token_counter: Callable[[str], int],
     tool_id_to_name_map: dict[int, str],
@@ -541,11 +544,11 @@ def convert_chat_history(
             )
 
             # Add the user message with image files attached
-            # If this is the last USER message, also include project_image_files
-            # Note: project image file tokens are NOT counted in the token count
+            # If this is the last USER message, also include context_image_files
+            # Note: context image file tokens are NOT counted in the token count
             if idx == last_user_message_idx:
-                if project_image_files:
-                    image_files.extend(project_image_files)
+                if context_image_files:
+                    image_files.extend(context_image_files)
 
                 if additional_context:
                     simple_messages.append(

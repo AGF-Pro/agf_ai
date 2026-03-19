@@ -92,6 +92,7 @@ from onyx.db.connector_credential_pair import get_connector_credential_pairs_for
 from onyx.db.connector_credential_pair import (
     get_connector_credential_pairs_for_user_parallel,
 )
+from onyx.db.connector_credential_pair import verify_user_has_access_to_cc_pair
 from onyx.db.credentials import cleanup_gmail_credentials
 from onyx.db.credentials import cleanup_google_drive_credentials
 from onyx.db.credentials import create_credential
@@ -478,7 +479,9 @@ def is_zip_file(file: UploadFile) -> bool:
 
 
 def upload_files(
-    files: list[UploadFile], file_origin: FileOrigin = FileOrigin.CONNECTOR
+    files: list[UploadFile],
+    file_origin: FileOrigin = FileOrigin.CONNECTOR,
+    unzip: bool = True,
 ) -> FileUploadResponse:
 
     # Skip directories and known macOS metadata entries
@@ -501,31 +504,46 @@ def upload_files(
                 if seen_zip:
                     raise HTTPException(status_code=400, detail=SEEN_ZIP_DETAIL)
                 seen_zip = True
+
+                # Validate the zip by opening it (catches corrupt/non-zip files)
                 with zipfile.ZipFile(file.file, "r") as zf:
-                    zip_metadata_file_id = save_zip_metadata_to_file_store(
-                        zf, file_store
-                    )
-                    for file_info in zf.namelist():
-                        if zf.getinfo(file_info).is_dir():
-                            continue
-
-                        if not should_process_file(file_info):
-                            continue
-
-                        sub_file_bytes = zf.read(file_info)
-
-                        mime_type, __ = mimetypes.guess_type(file_info)
-                        if mime_type is None:
-                            mime_type = "application/octet-stream"
-
-                        file_id = file_store.save_file(
-                            content=BytesIO(sub_file_bytes),
-                            display_name=os.path.basename(file_info),
-                            file_origin=file_origin,
-                            file_type=mime_type,
+                    if unzip:
+                        zip_metadata_file_id = save_zip_metadata_to_file_store(
+                            zf, file_store
                         )
-                        deduped_file_paths.append(file_id)
-                        deduped_file_names.append(os.path.basename(file_info))
+                        for file_info in zf.namelist():
+                            if zf.getinfo(file_info).is_dir():
+                                continue
+
+                            if not should_process_file(file_info):
+                                continue
+
+                            sub_file_bytes = zf.read(file_info)
+
+                            mime_type, __ = mimetypes.guess_type(file_info)
+                            if mime_type is None:
+                                mime_type = "application/octet-stream"
+
+                            file_id = file_store.save_file(
+                                content=BytesIO(sub_file_bytes),
+                                display_name=os.path.basename(file_info),
+                                file_origin=file_origin,
+                                file_type=mime_type,
+                            )
+                            deduped_file_paths.append(file_id)
+                            deduped_file_names.append(os.path.basename(file_info))
+                        continue
+
+                # Store the zip as-is (unzip=False)
+                file.file.seek(0)
+                file_id = file_store.save_file(
+                    content=file.file,
+                    display_name=file.filename,
+                    file_origin=file_origin,
+                    file_type=file.content_type or "application/zip",
+                )
+                deduped_file_paths.append(file_id)
+                deduped_file_names.append(file.filename)
                 continue
 
             # Since we can't render docx files in the UI,
@@ -572,18 +590,56 @@ def _normalize_file_names_for_backwards_compatibility(
     return file_names + file_locations[len(file_names) :]
 
 
+def _fetch_and_check_file_connector_cc_pair_permissions(
+    connector_id: int,
+    user: User,
+    db_session: Session,
+    require_editable: bool,
+) -> ConnectorCredentialPair:
+    cc_pair = fetch_connector_credential_pair_for_connector(db_session, connector_id)
+    if cc_pair is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No Connector-Credential Pair found for this connector",
+        )
+
+    has_requested_access = verify_user_has_access_to_cc_pair(
+        cc_pair_id=cc_pair.id,
+        db_session=db_session,
+        user=user,
+        get_editable=require_editable,
+    )
+    if has_requested_access:
+        return cc_pair
+
+    # Special case: global curators should be able to manage files
+    # for public file connectors even when they are not the creator.
+    if (
+        require_editable
+        and user.role == UserRole.GLOBAL_CURATOR
+        and cc_pair.access_type == AccessType.PUBLIC
+    ):
+        return cc_pair
+
+    raise HTTPException(
+        status_code=403,
+        detail="Access denied. User cannot manage files for this connector.",
+    )
+
+
 @router.post("/admin/connector/file/upload", tags=PUBLIC_API_TAGS)
 def upload_files_api(
     files: list[UploadFile],
+    unzip: bool = True,
     _: User = Depends(current_curator_or_admin_user),
 ) -> FileUploadResponse:
-    return upload_files(files, FileOrigin.OTHER)
+    return upload_files(files, FileOrigin.OTHER, unzip=unzip)
 
 
 @router.get("/admin/connector/{connector_id}/files", tags=PUBLIC_API_TAGS)
 def list_connector_files(
     connector_id: int,
-    user: User = Depends(current_curator_or_admin_user),  # noqa: ARG001
+    user: User = Depends(current_curator_or_admin_user),
     db_session: Session = Depends(get_session),
 ) -> ConnectorFilesResponse:
     """List all files in a file connector."""
@@ -595,6 +651,13 @@ def list_connector_files(
         raise HTTPException(
             status_code=400, detail="This endpoint only works with file connectors"
         )
+
+    _ = _fetch_and_check_file_connector_cc_pair_permissions(
+        connector_id=connector_id,
+        user=user,
+        db_session=db_session,
+        require_editable=False,
+    )
 
     file_locations = connector.connector_specific_config.get("file_locations", [])
     file_names = connector.connector_specific_config.get("file_names", [])
@@ -645,7 +708,7 @@ def update_connector_files(
     connector_id: int,
     files: list[UploadFile] | None = File(None),
     file_ids_to_remove: str = Form("[]"),
-    user: User = Depends(current_curator_or_admin_user),  # noqa: ARG001
+    user: User = Depends(current_curator_or_admin_user),
     db_session: Session = Depends(get_session),
 ) -> FileUploadResponse:
     """
@@ -663,12 +726,13 @@ def update_connector_files(
         )
 
     # Get the connector-credential pair for indexing/pruning triggers
-    cc_pair = fetch_connector_credential_pair_for_connector(db_session, connector_id)
-    if cc_pair is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No Connector-Credential Pair found for this connector",
-        )
+    # and validate user permissions for file management.
+    cc_pair = _fetch_and_check_file_connector_cc_pair_permissions(
+        connector_id=connector_id,
+        user=user,
+        db_session=db_session,
+        require_editable=True,
+    )
 
     # Parse file IDs to remove
     try:
@@ -1273,7 +1337,7 @@ def get_connector_indexing_status(
     # Track admin page visit for analytics
     mt_cloud_telemetry(
         tenant_id=tenant_id,
-        distinct_id=user.email,
+        distinct_id=str(user.id),
         event=MilestoneRecordType.VISITED_ADMIN_PAGE,
     )
 
@@ -1454,8 +1518,7 @@ def _validate_connector_allowed(source: DocumentSource) -> None:
             return
 
     raise ValueError(
-        "This connector type has been disabled by your system admin. "
-        "Please contact them to get it enabled if you wish to use it."
+        "This connector type has been disabled by your system admin. Please contact them to get it enabled if you wish to use it."
     )
 
 
@@ -1488,7 +1551,7 @@ def create_connector_from_model(
 
         mt_cloud_telemetry(
             tenant_id=tenant_id,
-            distinct_id=user.email,
+            distinct_id=str(user.id),
             event=MilestoneRecordType.CREATED_CONNECTOR,
         )
 
@@ -1561,13 +1624,12 @@ def create_connector_with_mock_credential(
         )
 
         logger.info(
-            f"create_connector_with_mock_credential - running check_for_indexing: "
-            f"cc_pair={response.data}"
+            f"create_connector_with_mock_credential - running check_for_indexing: cc_pair={response.data}"
         )
 
         mt_cloud_telemetry(
             tenant_id=tenant_id,
-            distinct_id=user.email,
+            distinct_id=str(user.id),
             event=MilestoneRecordType.CREATED_CONNECTOR,
         )
         return response
@@ -1859,7 +1921,7 @@ def get_connector_by_id(
 @router.post("/connector-request")
 def submit_connector_request(
     request_data: ConnectorRequestSubmission,
-    user: User | None = Depends(current_user),
+    user: User = Depends(current_user),
 ) -> StatusResponse:
     """
     Submit a connector request for Cloud deployments.
@@ -1871,9 +1933,7 @@ def submit_connector_request(
     if not connector_name:
         raise HTTPException(status_code=400, detail="Connector name cannot be empty")
 
-    # Get user identifier for telemetry
-    user_email = user.email if user else None
-    distinct_id = user_email or tenant_id
+    user_email = user.email
 
     # Track connector request via PostHog telemetry (Cloud only)
     from shared_configs.configs import MULTI_TENANT
@@ -1881,11 +1941,11 @@ def submit_connector_request(
     if MULTI_TENANT:
         mt_cloud_telemetry(
             tenant_id=tenant_id,
-            distinct_id=distinct_id,
+            distinct_id=str(user.id),
             event=MilestoneRecordType.REQUESTED_CONNECTOR,
             properties={
                 "connector_name": connector_name,
-                "user_email": user_email,
+                "user_email": user.email,
             },
         )
 
@@ -1896,7 +1956,7 @@ def submit_connector_request(
             email_body_text = f"""A new connector request has been submitted:
 
 Connector Name: {connector_name}
-User Email: {user_email or 'Not provided (anonymous user)'}
+User Email: {user_email or "Not provided (anonymous user)"}
 Tenant ID: {tenant_id}
 """
             email_body_html = f"""<html>
@@ -1904,7 +1964,7 @@ Tenant ID: {tenant_id}
 <p>A new connector request has been submitted:</p>
 <ul>
 <li><strong>Connector Name:</strong> {connector_name}</li>
-<li><strong>User Email:</strong> {user_email or 'Not provided (anonymous user)'}</li>
+<li><strong>User Email:</strong> {user_email or "Not provided (anonymous user)"}</li>
 <li><strong>Tenant ID:</strong> {tenant_id}</li>
 </ul>
 </body>
@@ -1926,8 +1986,7 @@ Tenant ID: {tenant_id}
             )
 
     logger.info(
-        f"Connector request submitted: {connector_name} by user {user_email or 'anonymous'} "
-        f"(tenant: {tenant_id})"
+        f"Connector request submitted: {connector_name} by user {user_email or 'anonymous'} (tenant: {tenant_id})"
     )
 
     return StatusResponse(
