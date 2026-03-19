@@ -1,19 +1,14 @@
 FROM nginx:1.25.5-alpine
 
-# curl → health-check polling; dos2unix → normalize line endings on Windows checkouts
 RUN apk add --no-cache curl dos2unix
 
-# nginx config templates
-COPY nginx.conf.template.railway        /etc/nginx/conf.d/nginx.conf.template.railway
-COPY mcp.conf.inc.template              /etc/nginx/conf.d/mcp.conf.inc.template
-COPY mcp_upstream.conf.inc.template     /etc/nginx/conf.d/mcp_upstream.conf.inc.template
-
-# Entrypoint: substitutes env vars, waits for api_server, starts nginx
+COPY nginx_conf_template.railway /etc/nginx/conf.d/nginx.conf.template.railway
+COPY mcp_conf_inc.template /etc/nginx/conf.d/mcp.conf.inc.template
+COPY mcp_upstream_conf_inc.template /etc/nginx/conf.d/mcp_upstream.conf.inc.template
 COPY run-nginx.railway.sh /run-nginx.railway.sh
+
 RUN dos2unix /run-nginx.railway.sh && chmod +x /run-nginx.railway.sh
 
-# Railway terminates SSL at the edge; we only need plain HTTP inside the container.
-# Railway injects PORT at runtime (defaults to 80 if not set).
 EXPOSE 80
 
 ENTRYPOINT ["/run-nginx.railway.sh"]
