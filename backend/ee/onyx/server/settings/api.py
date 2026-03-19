@@ -82,8 +82,11 @@ def apply_license_status_to_settings(settings: Settings) -> Settings:
     """
     if not LICENSE_ENFORCEMENT_ENABLED:
         # License enforcement disabled - EE code is loaded via
-        # ENABLE_PAID_ENTERPRISE_EDITION_FEATURES, so EE features are on
+        # ENABLE_PAID_ENTERPRISE_EDITION_FEATURES, so EE features are on.
+        # Also reset application_status to ACTIVE in case a previous GATED_ACCESS
+        # was persisted in the DB (e.g. from a prior deployment with enforcement on).
         settings.ee_features_enabled = True
+        settings.application_status = ApplicationStatus.ACTIVE
         return settings
 
     if MULTI_TENANT:
