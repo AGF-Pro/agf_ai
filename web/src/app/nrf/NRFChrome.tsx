@@ -70,7 +70,7 @@ export default function NRFChrome() {
 
   const customFooterContent =
     settings?.enterpriseSettings?.custom_lower_disclaimer_content ||
-    `[Onyx ${
+    `[AGF-AI ${
       settings?.webVersion || "dev"
     }]`;
   // const customFooterContent =

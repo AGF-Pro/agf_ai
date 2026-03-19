@@ -31,7 +31,7 @@ export const XlHeadline: Story = {
   args: {
     sizePreset: "headline",
     variant: "heading",
-    title: "Welcome to Onyx",
+    title: "Welcome to AGF-AI",
     description: "Your enterprise search and AI assistant platform.",
   },
 };
