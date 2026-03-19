@@ -589,8 +589,8 @@ export const OnyxIcon = ({
     <img
       src={src}
       alt="Icon"
-      style={{ width: `${size}px`, height: `${size}px` }}
-      className={`w-[${size}px] h-[${size}px] object-contain ` + className}
+      style={{ width: `180px`, height: `55px` }}
+      className={`w-[180px] h-[55px] object-contain ` + className}
     />
   );
 };
