@@ -12,9 +12,11 @@ RUN mkdir -p var/tmp var/db var/zookeeper logs \
 
 ENV VESPA_SKIP_UPGRADE_CHECK=true
 
-# Entrypoint script that fixes permissions at runtime (before volume is used)
+# Wrapper that fixes Railway volume permissions then delegates to the
+# original Vespa entrypoint (/usr/local/bin/start-container.sh).
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 
+# 19071 = config server, 8081 = container/query (HTTPS), 8080 = container/query (HTTP)
 EXPOSE 8080 8081 19071
 
 ENTRYPOINT ["/entrypoint.sh"]
